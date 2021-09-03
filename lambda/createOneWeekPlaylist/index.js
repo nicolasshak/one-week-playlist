@@ -1,26 +1,16 @@
 const SpotifyWebApi = require('spotify-web-api-node');
 const AWS = require('aws-sdk');
-AWS.config.update({region: 'us-east-1'});``
-const rdsDataService = new AWS.RDSDataService();
+AWS.config.update({
+    region: 'us-east-1',
+    endpoint: 'dynamodb.us-east-1.amazonaws.com'
+});
+const dynamodb = new AWS.DynamoDB();
 
 exports.handler = async (event) => {
 
     let { code } = JSON.parse(event.body);
 
-    let spotifyApi = new SpotifyWebApi({
-        clientId: 'c3afb837e40041e9ad1e7a35d200f0b1',
-        clientSecret: '7abda0af6a3042bdb773e963b33c63f5',
-        redirectUri: 'http://localhost:8000/submit'
-    });
-
-    let sqlParams = {
-        secretArn: 'arn:aws:secretsmanager:us-east-1:174459398466:secret:OneWeekPlaylist/MySQL-sY9GKa',
-        resourceArn: 'arn:aws:rds:us-east-1:174459398466:cluster:one-week-playlist',
-        sql: 'SELECT * FROM Users;',
-        //sql: 'INSERT INTO Users (userId, refreshToken, displayName) VALUES ("Test ID", "testToken", "testDisplayName")',
-        database: 'oneWeekPlaylist',
-        includeResultMetadata: true
-    }
+    let spotifyApi = new SpotifyWebApi();
 
     const promise = new Promise(async (resolve, reject) => {
 
@@ -35,49 +25,103 @@ exports.handler = async (event) => {
             .then(data => data.body)
             .catch(err => reject(err));
 
-        sqlParams.sql = `
-            INSERT INTO Users (displayName, refreshToken, userId)
-            VALUES ("${displayName}", "${spotifyApi.getRefreshToken()}", "${userId}")
-            ON DUPLICATE KEY UPDATE refreshToken="${spotifyApi.getRefreshToken()}";
-        `;
-
-        let insertRes = await new Promise((resolve, reject) => {
-
-            rdsDataService.executeStatement(sqlParams, (err, data) => {
-                if (err) {
-                    reject(err);
-                } else {
-                    resolve(data);
+        let getParams = {
+            TableName: "OneWeekPlaylist",
+            Key: {
+                "userId": {
+                    S: "nicolasshak"
                 }
+            },
+            UpdateExpression: "SET refreshToken = :refreshToken, accessToken = :accessToken",
+            ExpressionAttributeValues: {
+                ":refreshToken": { S: "test" },
+                ":accessToken": { S: "test2" }
+            },
+            ReturnValues: "ALL_NEW"
+        }
+
+        let one = await new Promise((resolve, reject) => {
+            dynamodb.updateItem(getParams, (err, data) => {
+                if(err) reject(err);
+                else resolve(data);
             });
         });
 
-        sqlParams.sql = `
-            SELECT COUNT(userId) FROM Playlists WHERE userId="${userId}";
-        `;
+        if(one['Attributes']['playlists'].length > 9) {
+            reject('Max 10 playlists per user!');
+        }
 
-        let selectRes = await new Promise((resolve, reject) => {
+        let promiseCreatePlaylist = spotify.createPlaylst('One Week Playlist');
 
-            rdsDataService.executeStatement(sqlParams, (err, data) => {
-                if(err) {
-                    reject(err);
-                } else {
-                    resolve(data);
+        let promiseCreateOverflow = spotify.createPlaylist('Overflow');
+
+        let [playlistId, overflowId] = await Promise.all([promiseCreatePlaylist, promiseCreateOverflow]);
+
+        console.log({playlistId, overflowId});
+
+        let params = {
+            TableName: "OneWeekPlaylist",
+            Key: {
+                "userId": {
+                    S: "nicolasshak"
                 }
+            },
+            UpdateExpression: "SET playlists = list_append(if_not_exists(playlists, :emptyList), :p)",
+            //ConditionExpression: "size(playlists) <= :max OR attribute_not_exists(playlists)",
+            ExpressionAttributeValues: {
+                ":p": {
+                    L: [
+                        {
+                            M: {
+                                "playlistUri": { S: "test" },
+                                "overflowUri": { S: "test3" },
+                                "period": { N: "7" }
+                            }
+                        }
+                    ]
+                },
+                ":emptyList": {
+                    L: []
+                },
+                // ":max": {
+                //     N: "10"
+                // }
+            },
+            ReturnValues: "ALL_NEW"
+        }
+
+        let two = await new Promise((resolve, reject) => {
+            dynamodb.updateItem(params, (err, data) => {
+                if(err) reject(err);
+                else resolve(data);
             });
         });
 
         resolve({
+            one,
+            two
+        });
+    });
+
+    return await promise.catch(err => {
+        return {
+            statusCode: 400,
+            eaders: {
+                "Access-Control-Allow-Headers" : "Content-Type",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
+            },
+            body: JSON.stringify(err)
+        }
+    }).then(res => {
+        return {
             statusCode: 200,
             headers: {
                 "Access-Control-Allow-Headers" : "Content-Type",
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "OPTIONS,POST,GET"
             },
-            //body: JSON.stringify({ insertRes, selectRes })
-            body: JSON.stringify('Test!')
-        });
+            body: JSON.stringify(res)
+        }
     });
-
-    return promise;
 };
